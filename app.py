@@ -12,15 +12,32 @@ from langchain_core.runnables import RunnablePassthrough
 st.set_page_config(page_title="Zyro Dynamics HR Help Desk", page_icon="🚀", layout="wide")
 st.title("Zyro Dynamics HR Help Desk Chatbot")
 
-# Configurations
-CORPUS_PATH = "/kaggle/input/zyro-dynamics-hr-corpus/"
+# --- FIXED DYNAMIC DIRECTORY RESOLUTION ---
+# This looks for your 'data' folder in all possible relative and absolute paths
+possible_paths = ["./data", "data", "../data", "/mount/src/" + os.path.basename(os.getcwd()) + "/data"]
+CORPUS_PATH = None
+
+for path in possible_paths:
+    if os.path.exists(path) and len(os.listdir(path)) > 0:
+        CORPUS_PATH = path
+        break
+
 REFUSAL_MESSAGE = "I can only answer HR-related questions from Zyro Dynamics policy documents."
 
 @st.cache_resource
 def initialize_rag_system():
+    # If no path matches, gracefully inform the user instead of throwing an index out of range crash
+    if CORPUS_PATH is None:
+        st.error("🚨 Critical Error: The 'data' folder containing your PDF files could not be found anywhere in your GitHub repo path. Please verify that your folder is named exactly 'data' (lowercase) and contains the 11 PDFs.")
+        st.stop()
+        
     # Loading
     loader = PyPDFDirectoryLoader(CORPUS_PATH)
     documents = loader.load()
+    
+    if not documents:
+        st.error(f"🚨 Found the directory at '{CORPUS_PATH}', but failed to read any text from the PDFs. Ensure they are valid, uncorrupted PDF documents.")
+        st.stop()
     
     # Chunking
     splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
@@ -31,23 +48,29 @@ def initialize_rag_system():
     vectorstore = FAISS.from_documents(chunks, embeddings)
     retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 4, "fetch_k": 10})
     
+    # Fetching API Key securely from Streamlit secrets management
+    api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+    
+    if not api_key:
+        st.error("🚨 Missing GROQ_API_KEY. Please add it to your Streamlit Advanced Secrets Settings.")
+        st.stop()
+        
     # LLM Models setup
-    llm = ChatGroq(model="llama3-8b-8192", temperature=0.1, max_tokens=512)
+    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1, max_tokens=512, groq_api_key=api_key)
     
     return retriever, llm
 
 try:
     retriever, llm = initialize_rag_system()
-    st.success("HR Corpus Knowledge Base successfully indexed!")
+    st.success(f"HR Knowledge Base indexed successfully from path: '{CORPUS_PATH}'!")
 except Exception as e:
-    st.error(f"Error loading system pipeline. Verify API Keys: {e}")
+    st.error(f"Error loading system pipeline: {e}")
     st.stop()
 
-# Conversation memory storage structures
+# --- CONVERSATION MEMORY & UI CHAT ENGINE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display conversation histories
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -56,7 +79,6 @@ for msg in st.session_state.messages:
                 for src in msg["sources"]:
                     st.caption(f"**Source File:** {src}")
 
-# Process incoming queries
 if user_query := st.chat_input("Ask a question about Zyro Dynamics HR policies:"):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
@@ -75,7 +97,6 @@ if user_query := st.chat_input("Ask a question about Zyro Dynamics HR policies:"
             sources_to_show = []
             st.markdown(ans_text)
         else:
-            # Active RAG Pipeline Execution
             retrieved_chunks = retriever.invoke(user_query)
             context_data = "\n\n".join(c.page_content for c in retrieved_chunks)
             
